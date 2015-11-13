@@ -11,8 +11,8 @@
 #include <nav_msgs/OccupancyGrid.h>
 #include <math.h>
 #include <algorithm> // std::min and std::max
-//hello wesley
-//hi
+#include <sensor_msgs/LaserScan.h>
+
 #define MAP_SIZE_X 100
 #define MAP_SIZE_Y 100
 #define OBSTACLE_THICKNESS
@@ -35,10 +35,13 @@ double ips_yaw;
 
 bool origin_init = false;
 double origin_x;
-double orgin_y;
+double origin_y;
 double origin_yaw;
 
-sensor_msgs::LaserScan laser_scan;
+std::vector<float> scan_ranges;
+int scan_pts;
+float scan_angle;
+float scan_angle_inc;
 
 double belief_map[MAP_SIZE_X][MAP_SIZE_Y];
 double log_map_init[MAP_SIZE_X][MAP_SIZE_Y];
@@ -48,12 +51,21 @@ short sgn(int x) { return x >= 0 ? 1 : -1; }
 double logit(double val) { return log(val / (1 - val)); }
 double log_to_prob(double val) { return exp(val / (1 + val)); }
 
+void init_origin()
+{
+    origin_x = ips_x;
+    origin_y = ips_y;
+    origin_yaw = ips_yaw;
+    origin_init = true;
+}
+
 #ifdef SIMULATION_MODE
 
 //Callback function for the Position topic (SIMULATION)
 void pose_callback(const gazebo_msgs::ModelStates& msg) 
 {
-    for(int i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
+    int i;
+    for(i = 0; i < msg.name.size(); i++) if(msg.name[i] == "mobile_base") break;
 
     ips_x = msg.pose[i].position.x ;
     ips_y = msg.pose[i].position.y ;
@@ -90,7 +102,15 @@ void map_callback(const nav_msgs::OccupancyGrid& msg)
 
 void scanner_callback(const sensor_msgs::LaserScan& msg)
 {
-	laser_scan = msg;
+    // get number of measurements in laser scan
+    scan_pts = msg.ranges.size();
+    scan_ranges.resize(scan_pts);
+    for (int i = 0; i < scan_pts; i++)
+    {
+	   scan_ranges[i] = msg.ranges[i];
+    }
+    scan_angle = msg.angle_min;
+    scan_angle_inc = msg.angle_increment;
 }
 
 // Bresenham Line Algorithm (pass empty vectors)
@@ -139,38 +159,45 @@ void map_update()
 	double ips_x_cache = ips_x;
 	double ips_y_cache = ips_y;
 	double ips_yaw_cache = ips_yaw;
-	sensor_msgs::LaserScan laser_scan_cache = laser_scan;
+
+    int scan_pts_cache = scan_pts;
+    float scan_angle_cache;
+    float scan_angle_inc_cache;
+    std::vector<float> scan_ranges_cache = scan_ranges;
+
+    for (int i = 0; i < scan_pts_cache; i++)
+    {
+       scan_ranges_cache[i] = scan_ranges[i];
+    }
 
 	// current robot grid position (origin for measurement)
-	int grid_pos_x = max(1, min( MAP_SIZE_X, MAP_SIZE_X / 2 + ips_x_cache - origin_x));
-	int grid_pos_y = max(1, min( MAP_SIZE_Y, MAP_SIZE_Y / 2 + ips_y_cache - origin_y));
-
-	// get number of measurements in laser scan
-	int scan_res = laser_scan_cache.ranges.size();
+	int grid_pos_x = std::max(1, std::min( MAP_SIZE_X, int(MAP_SIZE_X / 2 + ips_x_cache - origin_x)));
+	int grid_pos_y = std::max(1, std::min( MAP_SIZE_Y, int(MAP_SIZE_Y / 2 + ips_y_cache - origin_y)));
 
 	std::vector<int> bresenham_vector_x;
 	std::vector<int> bresenham_vector_y;
 
 	// loop through all measurements from the scan
-	for (int j = 1; j < scan_res; j++)
+	for (int j = 1; j < scan_pts_cache; j++)
 	{
 		// calculate measurement yaw
-		double meas_yaw = laser_scan_cache.angle_min + laser_scan_cache.angle_increment * j;
+		double meas_yaw = scan_angle_cache + scan_angle_inc_cache * j;
 		double ray_angle = meas_yaw + ips_yaw_cache - origin_yaw;
 
 		// calculate measurement endpoint
-		int endpt_x = max(1, min( MAP_SIZE_X, scan_ranges[j] * cos(ray_angle) - ips_x_cache - origin_x));
-		int endpt_y = max(1, min( MAP_SIZE_Y, scan_ranges[j] * sin(ray_angle) - ips_y_cache - origin_y));
+		int endpt_x = std::max(1, std::min( MAP_SIZE_X, int(scan_ranges_cache[j] * cos(ray_angle) - ips_x_cache - origin_x)));
+		int endpt_y = std::max(1, std::min( MAP_SIZE_Y, int(scan_ranges_cache[j] * sin(ray_angle) - ips_y_cache - origin_y)));
 
 		// send values to bresenham algorithm
 		bresenham(grid_pos_x, grid_pos_y, endpt_x, endpt_y, bresenham_vector_x, bresenham_vector_y);
 
-		for (int k = 0; k < max( bresenham_vector_x.size(), bresenham_vector_y.size() ); k++)
+        int k;
+		for (k = 0; k < std::max( bresenham_vector_x.size(), bresenham_vector_y.size() ); k++)
 		{
 			log_map[bresenham_vector_x[k]][bresenham_vector_y[k]] = log_map[bresenham_vector_x[k]][bresenham_vector_y[k]] + logit(PROB_IN_RAY) - logit(INITIAL_PROB);
 		}
 
-		if ( scan_ranges[j] < SCANNER_MAX_RANGE )
+		if ( scan_ranges_cache[j] < SCANNER_MAX_RANGE )
 		{
 			log_map[bresenham_vector_x[k]][bresenham_vector_y[k]] = log_map[bresenham_vector_x[k]][bresenham_vector_y[k]] + logit(PROB_AT_END) - logit(INITIAL_PROB);
 		}
@@ -189,14 +216,6 @@ void init_maps()
 	}
 }
 
-void init_origin()
-{
-	origin_x = ips_x;
-	origin_y = ips_y;
-	origin_yaw = ips_yaw;
-	origin_init = true;
-}
-
 void calc_probs()
 {
 	for (int i = 0; i < MAP_SIZE_X; i++)
@@ -206,12 +225,6 @@ void calc_probs()
 			belief_map[i][j] = log_to_prob(log_map[i][j]);
 		}
 	}
-}
-
-void robot_motion()
-{
-    vel.angular.z = 0.3; // set angular speed
-    velocity_publisher.publish(vel); // Publish the command velocity
 }
 
 int main(int argc, char **argv)
@@ -232,9 +245,6 @@ int main(int argc, char **argv)
     ros::Publisher velocity_publisher = n.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/navi", 1);
     pose_publisher = n.advertise<geometry_msgs::PoseStamped>("/pose", 1, true);
     marker_pub = n.advertise<visualization_msgs::Marker>("visualization_marker", 1, true);
-    
-    // Velocity control variable
-    geometry_msgs::Twist vel;
 
     // Set the loop rate
     ros::Rate loop_rate(20);    // 20Hz update rate
@@ -244,7 +254,11 @@ int main(int argc, char **argv)
     	loop_rate.sleep(); // Maintain the loop rate
     	ros::spinOnce();   // Check for new messages
 
-    	robot_motion();
+        // Velocity control variable
+        geometry_msgs::Twist vel;
+        vel.angular.z = 0.3; // set angular speed
+        velocity_publisher.publish(vel); // Publish the command velocity
+
     	map_update();
     	calc_probs();
     }
