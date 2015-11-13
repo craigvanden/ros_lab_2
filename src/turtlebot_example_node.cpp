@@ -11,7 +11,7 @@
 #include <nav_msgs/OccupancyGrid.h>
 #include <math.h>
 #include <algorithm> // std::min and std::max
-
+//hello wesley
 #define MAP_SIZE_X 100
 #define MAP_SIZE_Y 100
 #define OBSTACLE_THICKNESS
